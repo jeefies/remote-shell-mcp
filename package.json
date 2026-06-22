@@ -1,0 +1,33 @@
+{
+  "name": "remote-shell-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for agent-safe remote workspace file and shell operations over SSH.",
+  "type": "module",
+  "bin": {
+    "remote-shell-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/index.ts",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "smoke": "node scripts/smoke-test.mjs",
+    "test:profiles": "node scripts/profile-management-test.mjs",
+    "test:patch": "node scripts/patch-test.mjs",
+    "test:mcp": "node scripts/mcp-smoke-test.mjs",
+    "test:remote": "node scripts/remote-e2e-test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.18.0",
+    "ssh2": "^1.17.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ssh2": "^1.15.5",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

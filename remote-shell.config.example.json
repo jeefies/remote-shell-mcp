@@ -1,0 +1,25 @@
+{
+  "defaultProfile": "example",
+  "profiles": {
+    "example": {
+      "host": "example.com",
+      "port": 22,
+      "username": "deploy",
+      "privateKeyPath": "C:\\Users\\you\\.ssh\\id_ed25519",
+      "tryDefaultPrivateKeys": false,
+      "agent": "pageant",
+      "agentForward": false,
+      "defaultRoot": "/home/deploy/project",
+      "roots": ["/home/deploy/project"],
+      "defaultTimeoutMs": 30000,
+      "maxOutputBytes": 65536,
+      "maxReadBytes": 262144,
+      "fileCache": {
+        "enabled": true,
+        "maxFileBytes": 65536,
+        "ttlMs": 5000,
+        "maxEntries": 256
+      }
+    }
+  }
+}
