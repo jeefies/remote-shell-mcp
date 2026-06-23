@@ -55,6 +55,18 @@ try {
   assert.equal(compactOutput.outputMode, "compact");
   assert.equal(compactOutput.stdout.lineCount, 5);
 
+  const compactLongOutput = await callTool(manager, store, "shell", {
+    profile,
+    command: "seq 1 60",
+    cwd: ".",
+    timeoutMs: 10000,
+    outputMode: "compact",
+  });
+  assert.equal(compactLongOutput.stdout.lineCount, 60);
+  assert.equal(compactLongOutput.stdout.truncated, true);
+  assert.equal(compactLongOutput.stdout.head.length, 20);
+  assert.equal(compactLongOutput.stdout.tail.length, 20);
+
   const session = await callTool(manager, store, "session_create", {
     profile,
     cwd: ".",
@@ -86,6 +98,21 @@ try {
   });
   assert.equal(sessionCwd.cwd, "/root/remote-shell-mcp-test");
 
+  await assertToolError("ERR_PATH_OUTSIDE_ROOT", () =>
+    callTool(manager, store, "session_set_cwd", {
+      profile,
+      sessionId: session.id,
+      cwd: "/etc",
+    }),
+  );
+
+  await assertToolError("ERR_SESSION_NOT_FOUND", () =>
+    callTool(manager, store, "session_info", {
+      profile,
+      sessionId: "missing-session",
+    }),
+  );
+
   const gitSetup = await callTool(manager, store, "shell", {
     profile,
     command: `mkdir ${gitDirName} && cd ${gitDirName} && git init >/dev/null && printf 'tracked\\n' > tracked.txt`,
@@ -100,18 +127,29 @@ try {
     cwd: gitDirName,
   });
   assert.equal(gitStatus.cwd, `/root/remote-shell-mcp-test/${gitDirName}`);
+  assert.equal(gitStatus.counts.untracked, 1);
 
   const gitChangedFiles = await callTool(manager, store, "git_changed_files", {
     profile,
     cwd: gitDirName,
   });
   assert.ok(Array.isArray(gitChangedFiles));
+  assert.equal(gitChangedFiles[0].path, "tracked.txt");
+  assert.equal(gitChangedFiles[0].status, "untracked");
+
+  const gitDiffStat = await callTool(manager, store, "git_diff_stat", {
+    profile,
+    cwd: gitDirName,
+  });
+  assert.equal(gitDiffStat.cwd, `/root/remote-shell-mcp-test/${gitDirName}`);
+  assert.ok(Array.isArray(gitDiffStat.nameStatus));
 
   const review = await callTool(manager, store, "review_changes", {
     profile,
     cwd: gitDirName,
   });
   assert.equal(typeof review.changedCount, "number");
+  assert.equal(review.untrackedCount, 1);
 
   const initialList = await callTool(manager, store, "list_dir", {
     profile,

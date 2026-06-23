@@ -53,12 +53,50 @@ try {
     assert.ok(names.includes(expected), `Missing MCP tool: ${expected}`);
   }
 
+  const profileList = await client.callTool({
+    name: "profile_list",
+    arguments: {},
+  });
+  const profileListText = profileList.content.find((item) => item.type === "text")?.text ?? "";
+  const profiles = JSON.parse(profileListText);
+  assert.ok(Array.isArray(profiles.profiles));
+
+  const sessionCreate = await client.callTool({
+    name: "session_create",
+    arguments: {
+      profile: "test-root",
+      cwd: ".",
+    },
+  });
+  const sessionText = sessionCreate.content.find((item) => item.type === "text")?.text ?? "";
+  const session = JSON.parse(sessionText);
+  assert.equal(session.cwd, "/root/remote-shell-mcp-test");
+
+  const sessionInfo = await client.callTool({
+    name: "session_info",
+    arguments: {
+      profile: "test-root",
+      sessionId: session.id,
+    },
+  });
+  const sessionInfoText = sessionInfo.content.find((item) => item.type === "text")?.text ?? "";
+  assert.equal(JSON.parse(sessionInfoText).id, session.id);
+
+  await client.callTool({
+    name: "session_close",
+    arguments: {
+      profile: "test-root",
+      sessionId: session.id,
+    },
+  });
+
   console.log(
     JSON.stringify(
       {
         ok: true,
         toolCount: tools.length,
         tools: names,
+        profileCount: profiles.profiles.length,
       },
       null,
       2,

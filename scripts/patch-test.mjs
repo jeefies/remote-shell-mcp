@@ -34,4 +34,9 @@ assert.throws(
   /Patch hunk did not match file content/,
 );
 
+assert.throws(
+  () => applyPatchHunks("old\nline\nold\nline\n", operations[1].hunks, "app.txt"),
+  /Patch hunk matched more than once/,
+);
+
 console.log("patch tests passed");

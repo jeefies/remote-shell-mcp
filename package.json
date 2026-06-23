@@ -14,7 +14,8 @@
     "test:profiles": "node scripts/profile-management-test.mjs",
     "test:patch": "node scripts/patch-test.mjs",
     "test:mcp": "node scripts/mcp-smoke-test.mjs",
-    "test:remote": "node scripts/remote-e2e-test.mjs"
+    "test:remote": "node scripts/remote-e2e-test.mjs",
+    "test:all": "npm run check && npm run build && npm run test:patch && npm run test:profiles && npm run test:mcp"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.18.0",
