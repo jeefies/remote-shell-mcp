@@ -47,12 +47,17 @@ Expected tools include:
 
 - `profile_list`
 - `workspace_info`
+- `session_create`
+- `session_set_cwd`
 - `list_dir`
 - `read_file`
 - `write_file`
 - `edit_file`
 - `apply_patch`
 - `shell`
+- `git_status`
+- `git_diff_stat`
+- `review_changes`
 
 Start with read-only checks:
 
@@ -60,8 +65,11 @@ Start with read-only checks:
 profile_list
 workspace_info
 shell { "command": "pwd", "cwd": "." }
+shell { "command": "git status --short", "cwd": ".", "outputMode": "terminal" }
 list_dir { "path": "." }
 ```
+
+For multi-step work, create a session first and pass `sessionId` into follow-up `shell` and Git tools.
 
 Only run write tools against the configured test root:
 

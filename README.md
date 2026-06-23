@@ -11,6 +11,10 @@ The MVP focuses on a small remote code workspace surface:
 - `profile_delete`
 - `profile_set_default`
 - `workspace_info`
+- `session_create`
+- `session_info`
+- `session_set_cwd`
+- `session_close`
 - `list_dir`
 - `read_file`
 - `write_file`
@@ -18,6 +22,10 @@ The MVP focuses on a small remote code workspace surface:
 - `apply_patch`
 - `search`
 - `shell`
+- `git_status`
+- `git_diff_stat`
+- `git_changed_files`
+- `review_changes`
 
 The server is intended to run locally. It connects to remote hosts over SSH/SFTP and restricts all file operations and command working directories to configured remote roots.
 
@@ -85,6 +93,33 @@ Restart Codex, or start a new Codex thread, after changing MCP config.
 - Writes and edits support `expectedHash` to avoid overwriting changed files.
 - Shell `cwd` must stay under an allowed root.
 - Command output is truncated by configurable byte limits.
+
+## Sessions And Shell Output
+
+Use sessions when a task has a working directory that should persist across multiple commands:
+
+```json
+{ "cwd": "/root/project" }
+```
+
+Then pass the returned `sessionId` to `shell`, `git_status`, `git_diff_stat`, `git_changed_files`, or `review_changes`.
+
+`shell` supports three output modes:
+
+- `json`: default structured output with stdout/stderr fields.
+- `terminal`: terminal-like plain text for easier reading.
+- `compact`: line counts plus head/tail summaries for long output.
+
+Sessions store cwd and env only. They do not keep an interactive process alive; each command still runs as a separate SSH exec channel over the reused SSH connection.
+
+## Git Review Tools
+
+For large working tree changes, prefer Git-specific tools over raw `git status` output:
+
+- `git_status`: parsed branch, ahead/behind, changed files, and counts.
+- `git_diff_stat`: `git diff --stat` plus name-status lines.
+- `git_changed_files`: changed files only.
+- `review_changes`: compact status + diff stat + review hints.
 
 ## Connection And Cache Behavior
 

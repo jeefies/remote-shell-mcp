@@ -47,6 +47,7 @@ export interface DirectoryEntry {
 export interface ShellResult {
   command: string;
   cwd: string;
+  outputMode: "json";
   exitCode: number | null;
   signal: string | null;
   stdout: string;
@@ -54,6 +55,71 @@ export interface ShellResult {
   stdoutTruncated: boolean;
   stderrTruncated: boolean;
   durationMs: number;
+}
+
+export interface CompactShellResult {
+  command: string;
+  cwd: string;
+  outputMode: "compact";
+  exitCode: number | null;
+  signal: string | null;
+  stdout: CompactText;
+  stderr: CompactText;
+  durationMs: number;
+}
+
+export interface CompactText {
+  lineCount: number;
+  head: string[];
+  tail: string[];
+  truncated: boolean;
+}
+
+export type ShellOutputMode = "json" | "terminal" | "compact";
+export type ShellToolResult = ShellResult | CompactShellResult | string;
+
+export interface SessionInfo {
+  id: string;
+  profile: string;
+  cwd: string;
+  env: Record<string, string>;
+  createdAt: string;
+  updatedAt: string;
+  lastExitCode: number | null;
+}
+
+export interface GitChangedFile {
+  path: string;
+  originalPath?: string;
+  status: string;
+  staged: string;
+  unstaged: string;
+}
+
+export interface GitSummary {
+  cwd: string;
+  branch: string | null;
+  upstream: string | null;
+  ahead: number;
+  behind: number;
+  files: GitChangedFile[];
+  counts: Record<string, number>;
+  clean: boolean;
+}
+
+export interface GitDiffStat {
+  cwd: string;
+  base?: string;
+  stat: string;
+  nameStatus: string[];
+}
+
+export interface ReviewChangesResult {
+  status: GitSummary;
+  diffStat: GitDiffStat;
+  untrackedCount: number;
+  changedCount: number;
+  largeChangeHints: string[];
 }
 
 export interface FileReadResult {
@@ -110,6 +176,14 @@ export interface RemoteClient {
   writeFile(path: string, content: string, expectedHash?: string): Promise<WriteFileResult>;
   editFile(path: string, oldText: string, newText: string, expectedHash?: string): Promise<EditFileResult>;
   applyPatch(patch: string, expectedHashes?: Record<string, string>): Promise<ApplyPatchResult>;
+  createSession(args?: { cwd?: string; env?: Record<string, string> }): SessionInfo;
+  getSession(id: string): SessionInfo;
+  setSessionCwd(id: string, cwd: string): SessionInfo;
+  closeSession(id: string): { closed: string };
+  gitStatus(args: { cwd?: string; sessionId?: string }): Promise<GitSummary>;
+  gitDiffStat(args: { cwd?: string; sessionId?: string; base?: string }): Promise<GitDiffStat>;
+  gitChangedFiles(args: { cwd?: string; sessionId?: string }): Promise<GitChangedFile[]>;
+  reviewChanges(args: { cwd?: string; sessionId?: string; base?: string }): Promise<ReviewChangesResult>;
   search(args: {
     pattern: string;
     path?: string;
@@ -119,7 +193,9 @@ export interface RemoteClient {
   shell(args: {
     command: string;
     cwd?: string;
+    sessionId?: string;
     timeoutMs?: number;
     env?: Record<string, string>;
-  }): Promise<ShellResult>;
+    outputMode?: ShellOutputMode;
+  }): Promise<ShellToolResult>;
 }

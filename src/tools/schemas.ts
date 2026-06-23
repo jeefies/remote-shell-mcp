@@ -38,6 +38,28 @@ export const workspaceInfoSchema = z.object({
   profile: z.string().optional(),
 });
 
+export const sessionCreateSchema = z.object({
+  profile: z.string().optional(),
+  cwd: z.string().min(1).optional(),
+  env: z.record(z.string()).optional(),
+});
+
+export const sessionInfoSchema = z.object({
+  profile: z.string().optional(),
+  sessionId: z.string().min(1),
+});
+
+export const sessionSetCwdSchema = z.object({
+  profile: z.string().optional(),
+  sessionId: z.string().min(1),
+  cwd: z.string().min(1),
+});
+
+export const sessionCloseSchema = z.object({
+  profile: z.string().optional(),
+  sessionId: z.string().min(1),
+});
+
 export const listDirSchema = z.object({
   profile: z.string().optional(),
   path: z.string().min(1).default("."),
@@ -82,8 +104,20 @@ export const shellSchema = z.object({
   profile: z.string().optional(),
   command: z.string().min(1),
   cwd: z.string().min(1).optional(),
+  sessionId: z.string().min(1).optional(),
   timeoutMs: z.number().int().positive().optional(),
   env: z.record(z.string()).optional(),
+  outputMode: z.enum(["json", "terminal", "compact"]).default("json"),
+});
+
+export const gitToolSchema = z.object({
+  profile: z.string().optional(),
+  cwd: z.string().min(1).optional(),
+  sessionId: z.string().min(1).optional(),
+});
+
+export const gitDiffStatSchema = gitToolSchema.extend({
+  base: z.string().min(1).optional(),
 });
 
 export const toolDefinitions = [
@@ -198,6 +232,66 @@ export const toolDefinitions = [
       type: "object",
       properties: {
         profile: profileField,
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "session_create",
+    description: "Create a lightweight shell context with persistent cwd and env for later shell/git calls.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        profile: profileField,
+        cwd: {
+          type: "string",
+          description: "Initial remote cwd. Defaults to profile.defaultRoot.",
+        },
+        env: {
+          type: "object",
+          additionalProperties: { type: "string" },
+          description: "Environment variables to apply to commands run through this session.",
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "session_info",
+    description: "Return a shell session's current cwd, env, and last exit code.",
+    inputSchema: {
+      type: "object",
+      required: ["sessionId"],
+      properties: {
+        profile: profileField,
+        sessionId: { type: "string" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "session_set_cwd",
+    description: "Update a shell session's cwd under the configured allowed roots.",
+    inputSchema: {
+      type: "object",
+      required: ["sessionId", "cwd"],
+      properties: {
+        profile: profileField,
+        sessionId: { type: "string" },
+        cwd: { type: "string" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "session_close",
+    description: "Close a shell session context.",
+    inputSchema: {
+      type: "object",
+      required: ["sessionId"],
+      properties: {
+        profile: profileField,
+        sessionId: { type: "string" },
       },
       additionalProperties: false,
     },
@@ -343,7 +437,7 @@ export const toolDefinitions = [
   },
   {
     name: "shell",
-    description: "Run a remote shell command with cwd restriction, timeout, and output limits.",
+    description: "Run a remote shell command with cwd/session restriction, timeout, output limits, and optional compact/terminal output.",
     inputSchema: {
       type: "object",
       required: ["command"],
@@ -357,6 +451,10 @@ export const toolDefinitions = [
           type: "string",
           description: "Remote working directory. Defaults to profile.defaultRoot and must stay under allowed roots.",
         },
+        sessionId: {
+          type: "string",
+          description: "Optional session id created by session_create. Uses the session cwd/env unless overridden.",
+        },
         timeoutMs: {
           type: "number",
           description: "Command timeout in milliseconds.",
@@ -368,11 +466,66 @@ export const toolDefinitions = [
           },
           description: "Optional environment variables for this command.",
         },
+        outputMode: {
+          type: "string",
+          enum: ["json", "terminal", "compact"],
+          description: "json returns structured stdout/stderr; terminal returns plain terminal-like text; compact returns head/tail summaries.",
+          default: "json",
+        },
       },
       additionalProperties: false,
     },
   },
+  {
+    name: "git_status",
+    description: "Return a parsed git status summary for a remote working tree.",
+    inputSchema: gitInputSchema(),
+  },
+  {
+    name: "git_diff_stat",
+    description: "Return git diff --stat and name-status output for a remote working tree.",
+    inputSchema: gitInputSchema({
+      base: {
+        type: "string",
+        description: "Optional diff base argument.",
+      },
+    }),
+  },
+  {
+    name: "git_changed_files",
+    description: "Return parsed changed files from git status.",
+    inputSchema: gitInputSchema(),
+  },
+  {
+    name: "review_changes",
+    description: "Return a compact review summary combining git status, diff stat, and change counts.",
+    inputSchema: gitInputSchema({
+      base: {
+        type: "string",
+        description: "Optional diff base argument.",
+      },
+    }),
+  },
 ];
+
+function gitInputSchema(extraProperties: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    type: "object",
+    properties: {
+      profile: profileField,
+      cwd: {
+        type: "string",
+        description: "Remote working directory. Defaults to profile.defaultRoot or session cwd.",
+      },
+      sessionId: {
+        type: "string",
+        description: "Optional session id created by session_create.",
+      },
+      ...extraProperties,
+    },
+    additionalProperties: false,
+  };
+}
 
 function remoteProfileProperties(): Record<string, unknown> {
   return {

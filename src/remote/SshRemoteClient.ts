@@ -5,13 +5,20 @@ import { Client, type AnyAuthMethod, type ConnectConfig, type SFTPWrapper } from
 import { RemoteShellError } from "../errors.js";
 import type {
   ApplyPatchResult,
+  CompactShellResult,
   DirectoryEntry,
   EditFileResult,
   FileReadResult,
+  GitChangedFile,
+  GitDiffStat,
+  GitSummary,
   RemoteClient,
   RemoteProfileConfig,
+  ReviewChangesResult,
   SearchMatch,
   ShellResult,
+  ShellToolResult,
+  SessionInfo,
   WriteFileResult,
 } from "../types.js";
 import { sha256 } from "../util/hash.js";
@@ -36,11 +43,21 @@ interface CachedFile {
   cachedAt: number;
 }
 
+interface SessionState {
+  id: string;
+  cwd: string;
+  env: Record<string, string>;
+  createdAt: Date;
+  updatedAt: Date;
+  lastExitCode: number | null;
+}
+
 export class SshRemoteClient implements RemoteClient {
   private readonly conn = new Client();
   private connectPromise: Promise<void> | null = null;
   private sftpPromise: Promise<SFTPWrapper> | null = null;
   private readonly fileCache = new Map<string, CachedFile>();
+  private readonly sessions = new Map<string, SessionState>();
   private connected = false;
 
   constructor(
@@ -102,16 +119,28 @@ export class SshRemoteClient implements RemoteClient {
   }
 
   async workspaceInfo(): Promise<Record<string, unknown>> {
+    const commandNames = ["git", "rg", "node", "npm", "pnpm", "python3", "python", "pip3", "pip"];
     const probes = await Promise.all(
-      ["git", "rg", "node", "python3", "python"].map(async (command) => {
+      commandNames.map(async (command) => {
         const result = await this.shell({
-          command: `command -v ${command}`,
+          command: `p=$(command -v ${command} 2>/dev/null) && printf '%s\\n' "$p" && ${command} --version 2>&1 | head -n 1`,
           cwd: this.profile.defaultRoot,
           timeoutMs: 5_000,
-        });
-        return [command, result.exitCode === 0 && result.stdout.trim().length > 0] as const;
+        }) as ShellResult;
+        const lines = result.stdout.split(/\r?\n/).filter(Boolean);
+        return [command, {
+          available: result.exitCode === 0 && lines.length > 0,
+          path: lines[0] ?? null,
+          version: lines[1] ?? null,
+        }] as const;
       }),
     );
+    const shell = await this.shell({
+      command: "printf '%s\\n' \"$SHELL\"; uname -srm 2>/dev/null || true",
+      cwd: this.profile.defaultRoot,
+      timeoutMs: 5_000,
+    }) as ShellResult;
+    const shellLines = shell.stdout.split(/\r?\n/).filter(Boolean);
 
     return {
       profile: this.profileName,
@@ -120,6 +149,11 @@ export class SshRemoteClient implements RemoteClient {
       defaultRoot: this.profile.defaultRoot,
       roots: this.profile.roots,
       capabilities: Object.fromEntries(probes),
+      environment: {
+        shell: shellLines[0] || "sh",
+        system: shellLines[1] || null,
+        preferredPython: (Object.fromEntries(probes).python3 as { available: boolean }).available ? "python3" : "python",
+      },
       limits: {
         defaultTimeoutMs: this.profile.defaultTimeoutMs,
         maxOutputBytes: this.profile.maxOutputBytes,
@@ -319,6 +353,103 @@ export class SshRemoteClient implements RemoteClient {
     };
   }
 
+  createSession(args: { cwd?: string; env?: Record<string, string> } = {}): SessionInfo {
+    const cwd = resolveRemotePath(this.profile, args.cwd ?? this.profile.defaultRoot).path;
+    const env = args.env ?? {};
+    for (const key of Object.keys(env)) {
+      assertEnvName(key);
+    }
+
+    const now = new Date();
+    const session: SessionState = {
+      id: `s_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      cwd,
+      env,
+      createdAt: now,
+      updatedAt: now,
+      lastExitCode: null,
+    };
+    this.sessions.set(session.id, session);
+    return toSessionInfo(this.profileName, session);
+  }
+
+  getSession(id: string): SessionInfo {
+    return toSessionInfo(this.profileName, this.requireSession(id));
+  }
+
+  setSessionCwd(id: string, cwd: string): SessionInfo {
+    const session = this.requireSession(id);
+    session.cwd = resolveRemotePath(this.profile, cwd).path;
+    session.updatedAt = new Date();
+    return toSessionInfo(this.profileName, session);
+  }
+
+  closeSession(id: string): { closed: string } {
+    this.requireSession(id);
+    this.sessions.delete(id);
+    return { closed: id };
+  }
+
+  async gitStatus(args: { cwd?: string; sessionId?: string }): Promise<GitSummary> {
+    const cwd = this.resolveExecutionCwd(args.cwd, args.sessionId);
+    const result = await this.shell({
+      command: "git status --porcelain=v1 -b",
+      cwd,
+      timeoutMs: this.profile.defaultTimeoutMs,
+    }) as ShellResult;
+    if (result.exitCode !== 0) {
+      throw new RemoteShellError("git status failed", "ERR_GIT_STATUS", {
+        cwd,
+        stderr: result.stderr,
+      });
+    }
+    return parseGitStatus(result.stdout, cwd);
+  }
+
+  async gitDiffStat(args: { cwd?: string; sessionId?: string; base?: string }): Promise<GitDiffStat> {
+    const cwd = this.resolveExecutionCwd(args.cwd, args.sessionId);
+    const base = args.base?.trim();
+    const statCommand = base ? `git diff --stat ${shellQuote(base)}` : "git diff --stat";
+    const nameStatusCommand = base ? `git diff --name-status ${shellQuote(base)}` : "git diff --name-status";
+    const [stat, nameStatus] = await Promise.all([
+      this.shell({ command: statCommand, cwd, timeoutMs: this.profile.defaultTimeoutMs }) as Promise<ShellResult>,
+      this.shell({ command: nameStatusCommand, cwd, timeoutMs: this.profile.defaultTimeoutMs }) as Promise<ShellResult>,
+    ]);
+    if (stat.exitCode !== 0) {
+      throw new RemoteShellError("git diff --stat failed", "ERR_GIT_DIFF_STAT", { cwd, stderr: stat.stderr });
+    }
+    if (nameStatus.exitCode !== 0) {
+      throw new RemoteShellError("git diff --name-status failed", "ERR_GIT_NAME_STATUS", { cwd, stderr: nameStatus.stderr });
+    }
+    return {
+      cwd,
+      base,
+      stat: stat.stdout,
+      nameStatus: nameStatus.stdout.split(/\r?\n/).filter(Boolean),
+    };
+  }
+
+  async gitChangedFiles(args: { cwd?: string; sessionId?: string }): Promise<GitChangedFile[]> {
+    return (await this.gitStatus(args)).files;
+  }
+
+  async reviewChanges(args: { cwd?: string; sessionId?: string; base?: string }): Promise<ReviewChangesResult> {
+    const [status, diffStat] = await Promise.all([
+      this.gitStatus(args),
+      this.gitDiffStat(args),
+    ]);
+    const largeChangeHints = diffStat.nameStatus
+      .filter((line) => /^R|^D|^A/.test(line))
+      .slice(0, 50);
+    return {
+      status,
+      diffStat,
+      untrackedCount: status.files.filter((file) => file.status === "untracked").length,
+      changedCount: status.files.length,
+      largeChangeHints,
+    };
+  }
+
   async search(args: { pattern: string; path?: string; glob?: string; maxResults?: number }): Promise<SearchMatch[]> {
     const resolved = resolveRemotePath(this.profile, args.path ?? ".");
     const maxResults = Math.max(1, Math.min(args.maxResults ?? 100, 500));
@@ -341,7 +472,7 @@ export class SshRemoteClient implements RemoteClient {
       command,
       cwd: resolved.root,
       timeoutMs: this.profile.defaultTimeoutMs,
-    });
+    }) as ShellResult;
 
     if (result.exitCode === 127) {
       throw new RemoteShellError("Remote ripgrep command is not available", "ERR_SEARCH_TOOL_MISSING", {
@@ -364,22 +495,25 @@ export class SshRemoteClient implements RemoteClient {
   async shell(args: {
     command: string;
     cwd?: string;
+    sessionId?: string;
     timeoutMs?: number;
     env?: Record<string, string>;
-  }): Promise<ShellResult> {
+    outputMode?: "json" | "terminal" | "compact";
+  }): Promise<ShellToolResult> {
     await this.connect();
-    const resolvedCwd = resolveRemotePath(this.profile, args.cwd ?? this.profile.defaultRoot);
+    const session = args.sessionId ? this.requireSession(args.sessionId) : null;
+    const executionCwd = args.cwd ?? session?.cwd ?? this.profile.defaultRoot;
+    const resolvedCwd = resolveRemotePath(this.profile, executionCwd);
     const timeoutMs = Math.max(1, Math.min(args.timeoutMs ?? this.profile.defaultTimeoutMs, 10 * 60_000));
-    const envPrefix = args.env ? Object.entries(args.env).map(([key, value]) => {
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
-        throw new RemoteShellError("Invalid shell environment variable name", "ERR_INVALID_ENV", { key });
-      }
+    const mergedEnv = { ...(session?.env ?? {}), ...(args.env ?? {}) };
+    const envPrefix = Object.entries(mergedEnv).map(([key, value]) => {
+      assertEnvName(key);
       return `${key}=${shellQuote(value)}`;
-    }).join(" ") : "";
+    }).join(" ");
     const wrappedCommand = `cd ${shellQuote(resolvedCwd.path)} && ${envPrefix ? `${envPrefix} ` : ""}sh -lc ${shellQuote(args.command)}`;
 
     const startedAt = Date.now();
-    return new Promise<ShellResult>((resolve, reject) => {
+    return new Promise<ShellToolResult>((resolve, reject) => {
       let stdoutBytes = 0;
       let stderrBytes = 0;
       let stdoutTruncated = false;
@@ -399,9 +533,10 @@ export class SshRemoteClient implements RemoteClient {
           settled = true;
           stream.close();
           this.clearFileCache();
-          resolve({
+          const raw: ShellResult = {
             command: args.command,
             cwd: resolvedCwd.path,
+            outputMode: "json",
             exitCode: null,
             signal: "TIMEOUT",
             stdout: Buffer.concat(stdoutChunks).toString("utf8"),
@@ -409,7 +544,12 @@ export class SshRemoteClient implements RemoteClient {
             stdoutTruncated,
             stderrTruncated,
             durationMs: Date.now() - startedAt,
-          });
+          };
+          if (session) {
+            session.lastExitCode = null;
+            session.updatedAt = new Date();
+          }
+          resolve(this.formatShellResult(raw, args.outputMode ?? "json"));
         }, timeoutMs);
 
         stream.on("data", (chunk: Buffer) => {
@@ -433,9 +573,10 @@ export class SshRemoteClient implements RemoteClient {
             clearTimeout(timer);
           }
           this.clearFileCache();
-          resolve({
+          const raw: ShellResult = {
             command: args.command,
             cwd: resolvedCwd.path,
+            outputMode: "json",
             exitCode: code,
             signal,
             stdout: Buffer.concat(stdoutChunks).toString("utf8"),
@@ -443,7 +584,12 @@ export class SshRemoteClient implements RemoteClient {
             stdoutTruncated,
             stderrTruncated,
             durationMs: Date.now() - startedAt,
-          });
+          };
+          if (session) {
+            session.lastExitCode = code;
+            session.updatedAt = new Date();
+          }
+          resolve(this.formatShellResult(raw, args.outputMode ?? "json"));
         });
       });
     });
@@ -529,6 +675,45 @@ export class SshRemoteClient implements RemoteClient {
 
   private clearFileCache(): void {
     this.fileCache.clear();
+  }
+
+  private requireSession(id: string): SessionState {
+    const session = this.sessions.get(id);
+    if (!session) {
+      throw new RemoteShellError("Unknown shell session", "ERR_SESSION_NOT_FOUND", {
+        sessionId: id,
+        availableSessions: [...this.sessions.keys()],
+      });
+    }
+    return session;
+  }
+
+  private resolveExecutionCwd(cwd?: string, sessionId?: string): string {
+    return resolveRemotePath(this.profile, cwd ?? (sessionId ? this.requireSession(sessionId).cwd : this.profile.defaultRoot)).path;
+  }
+
+  private formatShellResult(result: ShellResult, mode: "json" | "terminal" | "compact"): ShellToolResult {
+    if (mode === "json") {
+      return result;
+    }
+
+    if (mode === "terminal") {
+      const header = `$ ${result.command}\n[cwd] ${result.cwd}\n`;
+      const stderr = result.stderr ? `\n[stderr]\n${result.stderr}` : "";
+      const footer = `\n[exit] ${result.exitCode ?? result.signal ?? "unknown"} in ${result.durationMs}ms`;
+      return `${header}${result.stdout}${stderr}${footer}`;
+    }
+
+    return {
+      command: result.command,
+      cwd: result.cwd,
+      outputMode: "compact",
+      exitCode: result.exitCode,
+      signal: result.signal,
+      stdout: compactText(result.stdout),
+      stderr: compactText(result.stderr),
+      durationMs: result.durationMs,
+    } satisfies CompactShellResult;
   }
 
   private buildAuthMethods(): AnyAuthMethod[] {
@@ -669,4 +854,126 @@ function assertExpectedHash(path: string, actualHash: string, expectedHash?: str
       actualHash,
     });
   }
+}
+
+function assertEnvName(key: string): void {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+    throw new RemoteShellError("Invalid shell environment variable name", "ERR_INVALID_ENV", { key });
+  }
+}
+
+function toSessionInfo(profile: string, session: SessionState): SessionInfo {
+  return {
+    id: session.id,
+    profile,
+    cwd: session.cwd,
+    env: session.env,
+    createdAt: session.createdAt.toISOString(),
+    updatedAt: session.updatedAt.toISOString(),
+    lastExitCode: session.lastExitCode,
+  };
+}
+
+function compactText(text: string): { lineCount: number; head: string[]; tail: string[]; truncated: boolean } {
+  const lines = text.length === 0 ? [] : text.replace(/\r\n/g, "\n").split("\n");
+  if (lines.at(-1) === "") {
+    lines.pop();
+  }
+
+  if (lines.length <= 40) {
+    return {
+      lineCount: lines.length,
+      head: lines,
+      tail: [],
+      truncated: false,
+    };
+  }
+
+  return {
+    lineCount: lines.length,
+    head: lines.slice(0, 20),
+    tail: lines.slice(-20),
+    truncated: true,
+  };
+}
+
+function parseGitStatus(stdout: string, cwd: string): GitSummary {
+  const lines = stdout.split(/\r?\n/).filter(Boolean);
+  const branchLine = lines.find((line) => line.startsWith("## "));
+  const branchInfo = parseBranchLine(branchLine);
+  const files = lines.filter((line) => !line.startsWith("## ")).map(parseStatusLine);
+  const counts: Record<string, number> = {};
+  for (const file of files) {
+    counts[file.status] = (counts[file.status] ?? 0) + 1;
+  }
+
+  return {
+    cwd,
+    ...branchInfo,
+    files,
+    counts,
+    clean: files.length === 0,
+  };
+}
+
+function parseBranchLine(line?: string): Pick<GitSummary, "branch" | "upstream" | "ahead" | "behind"> {
+  if (!line) {
+    return { branch: null, upstream: null, ahead: 0, behind: 0 };
+  }
+
+  const text = line.slice(3);
+  const [branchPart, trackingPart] = text.split("...");
+  let upstream: string | null = null;
+  let ahead = 0;
+  let behind = 0;
+
+  if (trackingPart) {
+    const match = /([^\s[]+)(?: \[(.*?)\])?/.exec(trackingPart);
+    upstream = match?.[1] ?? null;
+    const flags = match?.[2] ?? "";
+    const aheadMatch = /ahead (\d+)/.exec(flags);
+    const behindMatch = /behind (\d+)/.exec(flags);
+    ahead = aheadMatch ? Number(aheadMatch[1]) : 0;
+    behind = behindMatch ? Number(behindMatch[1]) : 0;
+  }
+
+  return {
+    branch: branchPart || null,
+    upstream,
+    ahead,
+    behind,
+  };
+}
+
+function parseStatusLine(line: string): GitChangedFile {
+  if (line.startsWith("?? ")) {
+    return {
+      path: line.slice(3),
+      status: "untracked",
+      staged: "?",
+      unstaged: "?",
+    };
+  }
+
+  const staged = line[0] ?? " ";
+  const unstaged = line[1] ?? " ";
+  const body = line.slice(3);
+  const renameParts = body.split(" -> ");
+  const status = statusLabel(staged, unstaged);
+  return {
+    path: renameParts.at(-1) ?? body,
+    originalPath: renameParts.length > 1 ? renameParts[0] : undefined,
+    status,
+    staged,
+    unstaged,
+  };
+}
+
+function statusLabel(staged: string, unstaged: string): string {
+  if (staged === "R" || unstaged === "R") return "renamed";
+  if (staged === "D" || unstaged === "D") return "deleted";
+  if (staged === "A" || unstaged === "A") return "added";
+  if (staged === "M" || unstaged === "M") return "modified";
+  if (staged === "?" || unstaged === "?") return "untracked";
+  return "changed";
 }

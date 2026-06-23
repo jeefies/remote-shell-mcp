@@ -121,7 +121,23 @@ Sets an existing profile as the default profile.
 
 ### `workspace_info`
 
-Returns selected profile metadata, configured roots, limits, and common remote command availability.
+Returns selected profile metadata, configured roots, limits, common remote command availability, command paths, versions, shell, system, and a preferred Python command.
+
+### `session_create`
+
+Creates a lightweight session context that stores cwd and env.
+
+### `session_info`
+
+Returns a session's cwd, env, timestamps, and last exit code.
+
+### `session_set_cwd`
+
+Updates a session cwd after validating it stays inside allowed roots.
+
+### `session_close`
+
+Removes a session context.
 
 ### `list_dir`
 
@@ -178,9 +194,32 @@ Runs remote `rg` under the selected root and returns parsed match objects.
 Runs a remote command through `sh -lc` with:
 
 - cwd restricted to allowed roots
+- optional session cwd/env
 - timeout
 - stdout/stderr byte limits
 - structured exit code and signal fields
+
+Output modes:
+
+- `json`: current structured result.
+- `terminal`: terminal-like plain text.
+- `compact`: line counts plus head/tail summaries.
+
+### `git_status`
+
+Returns parsed branch, upstream, ahead/behind, changed files, and change counts.
+
+### `git_diff_stat`
+
+Returns `git diff --stat` and `git diff --name-status` output.
+
+### `git_changed_files`
+
+Returns changed files from parsed `git status --porcelain=v1 -b`.
+
+### `review_changes`
+
+Combines Git status, diff stat, changed counts, untracked count, and review hints for large change sets.
 
 ## Extension Points
 

@@ -3,6 +3,8 @@ import type { ConfigStore } from "../config.js";
 import {
   applyPatchSchema,
   editFileSchema,
+  gitDiffStatSchema,
+  gitToolSchema,
   listDirSchema,
   profileCreateSchema,
   profileDeleteSchema,
@@ -12,6 +14,10 @@ import {
   profileUpdateSchema,
   readFileSchema,
   searchSchema,
+  sessionCloseSchema,
+  sessionCreateSchema,
+  sessionInfoSchema,
+  sessionSetCwdSchema,
   shellSchema,
   workspaceInfoSchema,
   writeFileSchema,
@@ -55,6 +61,25 @@ export async function callTool(manager: ClientManager, store: ConfigStore, name:
       const parsed = workspaceInfoSchema.parse(args);
       return manager.get(parsed.profile).workspaceInfo();
     }
+    case "session_create": {
+      const parsed = sessionCreateSchema.parse(args);
+      return manager.get(parsed.profile).createSession({
+        cwd: parsed.cwd,
+        env: parsed.env,
+      });
+    }
+    case "session_info": {
+      const parsed = sessionInfoSchema.parse(args);
+      return manager.get(parsed.profile).getSession(parsed.sessionId);
+    }
+    case "session_set_cwd": {
+      const parsed = sessionSetCwdSchema.parse(args);
+      return manager.get(parsed.profile).setSessionCwd(parsed.sessionId, parsed.cwd);
+    }
+    case "session_close": {
+      const parsed = sessionCloseSchema.parse(args);
+      return manager.get(parsed.profile).closeSession(parsed.sessionId);
+    }
     case "list_dir": {
       const parsed = listDirSchema.parse(args);
       return manager.get(parsed.profile).listDir(parsed.path);
@@ -84,6 +109,22 @@ export async function callTool(manager: ClientManager, store: ConfigStore, name:
     case "shell": {
       const parsed = shellSchema.parse(args);
       return manager.get(parsed.profile).shell(parsed);
+    }
+    case "git_status": {
+      const parsed = gitToolSchema.parse(args);
+      return manager.get(parsed.profile).gitStatus(parsed);
+    }
+    case "git_diff_stat": {
+      const parsed = gitDiffStatSchema.parse(args);
+      return manager.get(parsed.profile).gitDiffStat(parsed);
+    }
+    case "git_changed_files": {
+      const parsed = gitToolSchema.parse(args);
+      return manager.get(parsed.profile).gitChangedFiles(parsed);
+    }
+    case "review_changes": {
+      const parsed = gitDiffStatSchema.parse(args);
+      return manager.get(parsed.profile).reviewChanges(parsed);
     }
     default:
       throw new Error(`Unknown tool: ${name}`);
