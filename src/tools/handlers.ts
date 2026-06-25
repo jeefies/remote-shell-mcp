@@ -66,6 +66,7 @@ export async function callTool(manager: ClientManager, store: ConfigStore, name:
       return manager.get(parsed.profile).createSession({
         cwd: parsed.cwd,
         env: parsed.env,
+        mode: parsed.mode,
       });
     }
     case "session_info": {

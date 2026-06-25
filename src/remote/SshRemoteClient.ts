@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Client, type AnyAuthMethod, type ConnectConfig, type SFTPWrapper } from "ssh2";
+import { Client, type AnyAuthMethod, type ClientChannel, type ConnectConfig, type SFTPWrapper } from "ssh2";
 import { RemoteShellError } from "../errors.js";
 import type {
   ApplyPatchResult,
@@ -18,6 +18,7 @@ import type {
   SearchMatch,
   ShellResult,
   ShellToolResult,
+  SessionMode,
   SessionInfo,
   WriteFileResult,
 } from "../types.js";
@@ -45,11 +46,19 @@ interface CachedFile {
 
 interface SessionState {
   id: string;
+  mode: SessionMode;
   cwd: string;
   env: Record<string, string>;
   createdAt: Date;
   updatedAt: Date;
   lastExitCode: number | null;
+  interactive?: InteractiveSessionState;
+}
+
+interface InteractiveSessionState {
+  stream: ClientChannel;
+  queue: Promise<void>;
+  closed: boolean;
 }
 
 export class SshRemoteClient implements RemoteClient {
@@ -115,6 +124,10 @@ export class SshRemoteClient implements RemoteClient {
   async close(): Promise<void> {
     this.connected = false;
     this.sftpPromise = null;
+    for (const session of this.sessions.values()) {
+      this.closeInteractiveSession(session);
+    }
+    this.sessions.clear();
     this.conn.end();
   }
 
@@ -151,6 +164,8 @@ export class SshRemoteClient implements RemoteClient {
       capabilities: Object.fromEntries(probes),
       environment: {
         shell: shellLines[0] || "sh",
+        configuredShell: this.profile.shell,
+        hasInitCommand: Boolean(this.profile.initCommand),
         system: shellLines[1] || null,
         preferredPython: (Object.fromEntries(probes).python3 as { available: boolean }).available ? "python3" : "python",
       },
@@ -353,7 +368,7 @@ export class SshRemoteClient implements RemoteClient {
     };
   }
 
-  createSession(args: { cwd?: string; env?: Record<string, string> } = {}): SessionInfo {
+  async createSession(args: { cwd?: string; env?: Record<string, string>; mode?: SessionMode } = {}): Promise<SessionInfo> {
     const cwd = resolveRemotePath(this.profile, args.cwd ?? this.profile.defaultRoot).path;
     const env = args.env ?? {};
     for (const key of Object.keys(env)) {
@@ -363,6 +378,7 @@ export class SshRemoteClient implements RemoteClient {
     const now = new Date();
     const session: SessionState = {
       id: `s_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+      mode: args.mode ?? "context",
       cwd,
       env,
       createdAt: now,
@@ -370,6 +386,15 @@ export class SshRemoteClient implements RemoteClient {
       lastExitCode: null,
     };
     this.sessions.set(session.id, session);
+    if (session.mode === "interactive") {
+      try {
+        await this.openInteractiveSession(session);
+      } catch (error) {
+        this.closeInteractiveSession(session);
+        this.sessions.delete(session.id);
+        throw error;
+      }
+    }
     return toSessionInfo(this.profileName, session);
   }
 
@@ -385,7 +410,8 @@ export class SshRemoteClient implements RemoteClient {
   }
 
   closeSession(id: string): { closed: string } {
-    this.requireSession(id);
+    const session = this.requireSession(id);
+    this.closeInteractiveSession(session);
     this.sessions.delete(id);
     return { closed: id };
   }
@@ -395,6 +421,7 @@ export class SshRemoteClient implements RemoteClient {
     const result = await this.shell({
       command: "git status --porcelain=v1 -b",
       cwd,
+      sessionId: args.sessionId,
       timeoutMs: this.profile.defaultTimeoutMs,
     }) as ShellResult;
     if (result.exitCode !== 0) {
@@ -412,8 +439,8 @@ export class SshRemoteClient implements RemoteClient {
     const statCommand = base ? `git diff --stat ${shellQuote(base)}` : "git diff --stat";
     const nameStatusCommand = base ? `git diff --name-status ${shellQuote(base)}` : "git diff --name-status";
     const [stat, nameStatus] = await Promise.all([
-      this.shell({ command: statCommand, cwd, timeoutMs: this.profile.defaultTimeoutMs }) as Promise<ShellResult>,
-      this.shell({ command: nameStatusCommand, cwd, timeoutMs: this.profile.defaultTimeoutMs }) as Promise<ShellResult>,
+      this.shell({ command: statCommand, cwd, sessionId: args.sessionId, timeoutMs: this.profile.defaultTimeoutMs }) as Promise<ShellResult>,
+      this.shell({ command: nameStatusCommand, cwd, sessionId: args.sessionId, timeoutMs: this.profile.defaultTimeoutMs }) as Promise<ShellResult>,
     ]);
     if (stat.exitCode !== 0) {
       throw new RemoteShellError("git diff --stat failed", "ERR_GIT_DIFF_STAT", { cwd, stderr: stat.stderr });
@@ -506,11 +533,22 @@ export class SshRemoteClient implements RemoteClient {
     const resolvedCwd = resolveRemotePath(this.profile, executionCwd);
     const timeoutMs = Math.max(1, Math.min(args.timeoutMs ?? this.profile.defaultTimeoutMs, 10 * 60_000));
     const mergedEnv = { ...(session?.env ?? {}), ...(args.env ?? {}) };
+    if (session?.mode === "interactive") {
+      return this.runInteractiveShellCommand(session, {
+        command: args.command,
+        cwd: resolvedCwd.path,
+        env: args.env ?? {},
+        timeoutMs,
+        outputMode: args.outputMode ?? "json",
+      });
+    }
+
     const envPrefix = Object.entries(mergedEnv).map(([key, value]) => {
       assertEnvName(key);
       return `${key}=${shellQuote(value)}`;
     }).join(" ");
-    const wrappedCommand = `cd ${shellQuote(resolvedCwd.path)} && ${envPrefix ? `${envPrefix} ` : ""}sh -lc ${shellQuote(args.command)}`;
+    const commandBody = this.composeShellBody(args.command);
+    const wrappedCommand = `cd ${shellQuote(resolvedCwd.path)} && ${envPrefix ? `${envPrefix} ` : ""}${shellQuote(this.profile.shell)} -lc ${shellQuote(commandBody)}`;
 
     const startedAt = Date.now();
     return new Promise<ShellToolResult>((resolve, reject) => {
@@ -593,6 +631,235 @@ export class SshRemoteClient implements RemoteClient {
         });
       });
     });
+  }
+
+  private async openInteractiveSession(session: SessionState): Promise<void> {
+    await this.connect();
+    const shellCommand = `${shellQuote(this.profile.shell)} -i`;
+    const stream = await new Promise<ClientChannel>((resolve, reject) => {
+      this.conn.exec(shellCommand, (error, channel) => {
+        if (error) {
+          reject(new RemoteShellError(`Failed to open interactive shell: ${error.message}`, "ERR_INTERACTIVE_SHELL"));
+          return;
+        }
+        resolve(channel);
+      });
+    });
+
+    session.interactive = {
+      stream,
+      queue: Promise.resolve(),
+      closed: false,
+    };
+
+    stream.once("close", () => {
+      if (session.interactive) {
+        session.interactive.closed = true;
+      }
+    });
+
+    const initCommand = [
+      "export PS1=''",
+      "unset PROMPT_COMMAND",
+      ...this.exportCommands(session.env),
+      this.profile.initCommand,
+      `cd ${shellQuote(session.cwd)}`,
+    ].filter((line): line is string => Boolean(line && line.trim())).join("\n");
+
+    const result = await this.executeInteractiveCommand(session, {
+      command: initCommand,
+      displayCommand: "<interactive session init>",
+      cwd: session.cwd,
+      timeoutMs: this.profile.defaultTimeoutMs,
+    });
+
+    if (result.exitCode !== 0) {
+      throw new RemoteShellError("Interactive shell initialization failed", "ERR_INTERACTIVE_INIT", {
+        profile: this.profileName,
+        shell: this.profile.shell,
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+      });
+    }
+  }
+
+  private runInteractiveShellCommand(session: SessionState, args: {
+    command: string;
+    cwd: string;
+    env: Record<string, string>;
+    timeoutMs: number;
+    outputMode: "json" | "terminal" | "compact";
+  }): Promise<ShellToolResult> {
+    if (!session.interactive || session.interactive.closed) {
+      throw new RemoteShellError("Interactive shell session is closed", "ERR_SESSION_CLOSED", {
+        sessionId: session.id,
+      });
+    }
+
+    const run = async (): Promise<ShellToolResult> => {
+      const commandLines: string[] = [];
+      if (args.cwd !== session.cwd) {
+        commandLines.push(`cd ${shellQuote(args.cwd)}`);
+        session.cwd = args.cwd;
+      }
+
+      commandLines.push(...this.exportCommands(args.env));
+      if (Object.keys(args.env).length > 0) {
+        session.env = { ...session.env, ...args.env };
+      }
+
+      commandLines.push(args.command);
+      const raw = await this.executeInteractiveCommand(session, {
+        command: commandLines.join("\n"),
+        displayCommand: args.command,
+        cwd: session.cwd,
+        timeoutMs: args.timeoutMs,
+      });
+      return this.formatShellResult(raw, args.outputMode);
+    };
+
+    const current = session.interactive.queue.then(run, run);
+    session.interactive.queue = current.then(() => undefined, () => undefined);
+    return current;
+  }
+
+  private executeInteractiveCommand(session: SessionState, args: {
+    command: string;
+    displayCommand: string;
+    cwd: string;
+    timeoutMs: number;
+  }): Promise<ShellResult> {
+    const runtime = session.interactive;
+    if (!runtime || runtime.closed) {
+      throw new RemoteShellError("Interactive shell session is closed", "ERR_SESSION_CLOSED", {
+        sessionId: session.id,
+      });
+    }
+
+    const startedAt = Date.now();
+    const token = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+    const beginMarker = `__REMOTE_SHELL_BEGIN_${token}__`;
+    const statusPrefix = `__REMOTE_SHELL_STATUS_${token}__:`;
+    const pwdPrefix = `__REMOTE_SHELL_PWD_${token}__:`;
+    const wrappedCommand = [
+      `printf '%s\\n' ${shellQuote(beginMarker)}`,
+      args.command,
+      "__remote_shell_status=$?",
+      "__remote_shell_pwd=$(pwd 2>/dev/null || printf '')",
+      `printf '%s%s\\n' ${shellQuote(statusPrefix)} "$__remote_shell_status"`,
+      `printf '%s%s\\n' ${shellQuote(pwdPrefix)} "$__remote_shell_pwd"`,
+    ].join("\n") + "\n";
+
+    return new Promise<ShellResult>((resolve) => {
+      let stdoutBytes = 0;
+      let stderrBytes = 0;
+      let stdoutTruncated = false;
+      let stderrTruncated = false;
+      const stdoutChunks: Buffer[] = [];
+      const stderrChunks: Buffer[] = [];
+      let markerBuffer = "";
+      let settled = false;
+
+      const cleanup = () => {
+        runtime.stream.off("data", onStdout);
+        runtime.stream.stderr.off("data", onStderr);
+        runtime.stream.off("close", onClose);
+        clearTimeout(timer);
+      };
+
+      const finish = (exitCode: number | null, signal: string | null, cwd: string, timedOut = false) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        this.clearFileCache();
+        const stdout = stripInteractiveMarkers(
+          Buffer.concat(stdoutChunks).toString("utf8"),
+          beginMarker,
+          [statusPrefix, pwdPrefix],
+        );
+        const stderr = Buffer.concat(stderrChunks).toString("utf8");
+        session.cwd = cwd || session.cwd;
+        session.lastExitCode = exitCode;
+        session.updatedAt = new Date();
+        resolve({
+          command: args.displayCommand,
+          cwd: session.cwd,
+          outputMode: "json",
+          exitCode,
+          signal: timedOut ? "TIMEOUT" : signal,
+          stdout,
+          stderr,
+          stdoutTruncated,
+          stderrTruncated,
+          durationMs: Date.now() - startedAt,
+        });
+      };
+
+      const tryComplete = () => {
+        const statusMatch = new RegExp(`${escapeRegExp(statusPrefix)}(\\d+)`).exec(markerBuffer);
+        const pwdMatch = new RegExp(`${escapeRegExp(pwdPrefix)}([^\\r\\n]*)`).exec(markerBuffer);
+        if (!statusMatch || !pwdMatch) {
+          return;
+        }
+        finish(Number(statusMatch[1]), null, pwdMatch[1]);
+      };
+
+      const onStdout = (chunk: Buffer) => {
+        const result = appendLimited(stdoutChunks, chunk, stdoutBytes, this.profile.maxOutputBytes);
+        stdoutBytes = result.bytes;
+        stdoutTruncated = stdoutTruncated || result.truncated;
+        markerBuffer = `${markerBuffer}${chunk.toString("utf8")}`;
+        if (markerBuffer.length > 32_768) {
+          markerBuffer = markerBuffer.slice(-32_768);
+        }
+        tryComplete();
+      };
+
+      const onStderr = (chunk: Buffer) => {
+        const result = appendLimited(stderrChunks, chunk, stderrBytes, this.profile.maxOutputBytes);
+        stderrBytes = result.bytes;
+        stderrTruncated = stderrTruncated || result.truncated;
+      };
+
+      const onClose = (code: number | null, signal: string | null) => {
+        runtime.closed = true;
+        finish(code, signal, session.cwd);
+      };
+
+      const timer = setTimeout(() => {
+        runtime.closed = true;
+        finish(null, "TIMEOUT", session.cwd, true);
+        runtime.stream.close();
+      }, args.timeoutMs);
+
+      runtime.stream.on("data", onStdout);
+      runtime.stream.stderr.on("data", onStderr);
+      runtime.stream.once("close", onClose);
+      runtime.stream.write(wrappedCommand);
+    });
+  }
+
+  private composeShellBody(command: string): string {
+    return [this.profile.initCommand, command]
+      .filter((line): line is string => Boolean(line && line.trim()))
+      .join("\n");
+  }
+
+  private exportCommands(env: Record<string, string>): string[] {
+    return Object.entries(env).map(([key, value]) => {
+      assertEnvName(key);
+      return `export ${key}=${shellQuote(value)}`;
+    });
+  }
+
+  private closeInteractiveSession(session: SessionState): void {
+    if (!session.interactive || session.interactive.closed) {
+      return;
+    }
+    session.interactive.closed = true;
+    session.interactive.stream.close();
   }
 
   private async getSftp(): Promise<SFTPWrapper> {
@@ -866,12 +1133,28 @@ function toSessionInfo(profile: string, session: SessionState): SessionInfo {
   return {
     id: session.id,
     profile,
+    mode: session.mode,
     cwd: session.cwd,
     env: session.env,
     createdAt: session.createdAt.toISOString(),
     updatedAt: session.updatedAt.toISOString(),
     lastExitCode: session.lastExitCode,
   };
+}
+
+function stripInteractiveMarkers(raw: string, beginMarker: string, endPrefixes: string[]): string {
+  let output = raw.replace(`${beginMarker}\r\n`, "").replace(`${beginMarker}\n`, "");
+  const markerIndexes = endPrefixes
+    .map((prefix) => output.indexOf(prefix))
+    .filter((index) => index >= 0);
+  if (markerIndexes.length > 0) {
+    output = output.slice(0, Math.min(...markerIndexes));
+  }
+  return output;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function compactText(text: string): { lineCount: number; head: string[]; tail: string[]; truncated: boolean } {

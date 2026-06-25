@@ -104,13 +104,19 @@ Use sessions when a task has a working directory that should persist across mult
 
 Then pass the returned `sessionId` to `shell`, `git_status`, `git_diff_stat`, `git_changed_files`, or `review_changes`.
 
+By default, sessions use `mode: "context"` and store cwd/env only. To reuse one remote shell process across multiple commands, create an interactive session:
+
+```json
+{ "cwd": "/root/project", "mode": "interactive" }
+```
+
+Interactive sessions preserve shell-local state such as `cd`, exported variables, functions, and environment activations until `session_close` or server shutdown.
+
 `shell` supports three output modes:
 
 - `json`: default structured output with stdout/stderr fields.
 - `terminal`: terminal-like plain text for easier reading.
 - `compact`: line counts plus head/tail summaries for long output.
-
-Sessions store cwd and env only. They do not keep an interactive process alive; each command still runs as a separate SSH exec channel over the reused SSH connection.
 
 ## Git Review Tools
 
@@ -123,7 +129,9 @@ For large working tree changes, prefer Git-specific tools over raw `git status` 
 
 ## Connection And Cache Behavior
 
-Within one running MCP server process, SSH connections are reused per profile. Each `shell` call opens a new exec channel over the existing SSH connection instead of creating a new SSH connection.
+Within one running MCP server process, SSH connections are reused per profile. One-shot `shell` calls open new exec channels over the existing SSH connection. Interactive sessions keep one shell channel alive and serialize commands sent to that session.
+
+Profiles can set `shell` and `initCommand`. One-shot shell calls run the init command before the user command. Interactive sessions run it once when the session is created.
 
 `read_file` uses a small in-memory cache when `fileCache.enabled` is true:
 

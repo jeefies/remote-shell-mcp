@@ -42,6 +42,7 @@ export const sessionCreateSchema = z.object({
   profile: z.string().optional(),
   cwd: z.string().min(1).optional(),
   env: z.record(z.string()).optional(),
+  mode: z.enum(["context", "interactive"]).default("context"),
 });
 
 export const sessionInfoSchema = z.object({
@@ -238,7 +239,7 @@ export const toolDefinitions = [
   },
   {
     name: "session_create",
-    description: "Create a lightweight shell context with persistent cwd and env for later shell/git calls.",
+    description: "Create a shell session. Use mode=interactive to keep one remote shell process alive across commands.",
     inputSchema: {
       type: "object",
       properties: {
@@ -251,6 +252,12 @@ export const toolDefinitions = [
           type: "object",
           additionalProperties: { type: "string" },
           description: "Environment variables to apply to commands run through this session.",
+        },
+        mode: {
+          type: "string",
+          enum: ["context", "interactive"],
+          description: "context stores cwd/env only; interactive opens a persistent remote shell instance.",
+          default: "context",
         },
       },
       additionalProperties: false,
@@ -445,7 +452,7 @@ export const toolDefinitions = [
         profile: profileField,
         command: {
           type: "string",
-          description: "Command to run through sh -lc.",
+          description: "Command to run through the profile shell. Interactive sessions reuse one shell instance.",
         },
         cwd: {
           type: "string",
@@ -567,6 +574,15 @@ function remoteProfileProperties(): Record<string, unknown> {
       type: "boolean",
       description: "Enable SSH agent forwarding.",
       default: false,
+    },
+    shell: {
+      type: "string",
+      description: "Remote shell executable used for shell commands, for example sh or bash.",
+      default: "sh",
+    },
+    initCommand: {
+      type: "string",
+      description: "Optional shell initialization command run before one-shot commands and once when creating an interactive session.",
     },
     defaultRoot: {
       type: "string",

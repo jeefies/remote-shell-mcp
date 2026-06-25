@@ -12,10 +12,13 @@ const profile = "test-root";
 const fileName = `mcp-e2e-${Date.now()}.txt`;
 const patchFileName = `mcp-e2e-patch-${Date.now()}.txt`;
 const gitDirName = `mcp-e2e-git-${Date.now()}`;
+const interactiveDirName = `mcp-e2e-interactive-${Date.now()}`;
 let createdTestFile = false;
 let createdPatchFile = false;
 let createdGitDir = false;
+let createdInteractiveDir = false;
 let sessionId = null;
+let interactiveSessionId = null;
 
 try {
   const profiles = await callTool(manager, store, "profile_list", {});
@@ -76,6 +79,7 @@ try {
   });
   sessionId = session.id;
   assert.equal(session.cwd, "/root/remote-shell-mcp-test");
+  assert.equal(session.mode, "context");
 
   const sessionShell = await callTool(manager, store, "shell", {
     profile,
@@ -113,6 +117,37 @@ try {
     }),
   );
 
+  const interactiveSession = await callTool(manager, store, "session_create", {
+    profile,
+    cwd: ".",
+    mode: "interactive",
+  });
+  interactiveSessionId = interactiveSession.id;
+  assert.equal(interactiveSession.mode, "interactive");
+
+  const interactiveSetup = await callTool(manager, store, "shell", {
+    profile,
+    sessionId: interactiveSession.id,
+    command: `mkdir ${interactiveDirName} && cd ${interactiveDirName} && export REMOTE_SHELL_INTERACTIVE=kept`,
+    timeoutMs: 10000,
+  });
+  assert.equal(interactiveSetup.exitCode, 0);
+  createdInteractiveDir = true;
+
+  const interactiveCheck = await callTool(manager, store, "shell", {
+    profile,
+    sessionId: interactiveSession.id,
+    command: "printf '%s:%s\\n' \"$(basename \"$PWD\")\" \"$REMOTE_SHELL_INTERACTIVE\"",
+    timeoutMs: 10000,
+  });
+  assert.equal(interactiveCheck.stdout.trim(), `${interactiveDirName}:kept`);
+
+  const interactiveInfo = await callTool(manager, store, "session_info", {
+    profile,
+    sessionId: interactiveSession.id,
+  });
+  assert.equal(interactiveInfo.cwd, `/root/remote-shell-mcp-test/${interactiveDirName}`);
+
   const gitSetup = await callTool(manager, store, "shell", {
     profile,
     command: `mkdir ${gitDirName} && cd ${gitDirName} && git init >/dev/null && printf 'tracked\\n' > tracked.txt`,
@@ -128,6 +163,13 @@ try {
   });
   assert.equal(gitStatus.cwd, `/root/remote-shell-mcp-test/${gitDirName}`);
   assert.equal(gitStatus.counts.untracked, 1);
+
+  const gitStatusWithInteractiveSession = await callTool(manager, store, "git_status", {
+    profile,
+    sessionId: interactiveSession.id,
+    cwd: gitDirName,
+  });
+  assert.equal(gitStatusWithInteractiveSession.counts.untracked, 1);
 
   const gitChangedFiles = await callTool(manager, store, "git_changed_files", {
     profile,
@@ -301,6 +343,7 @@ try {
         gitDir: `/root/remote-shell-mcp-test/${gitDirName}`,
         initialListCount: initialList.length,
         sessionId,
+        interactiveSessionId,
       },
       null,
       2,
@@ -312,6 +355,16 @@ try {
       await callTool(manager, store, "session_close", {
         profile,
         sessionId,
+      });
+    } catch {
+      // Best effort session cleanup.
+    }
+  }
+  if (interactiveSessionId) {
+    try {
+      await callTool(manager, store, "session_close", {
+        profile,
+        sessionId: interactiveSessionId,
       });
     } catch {
       // Best effort session cleanup.
@@ -375,6 +428,28 @@ try {
           {
             cleanupWarning: true,
             fileName: gitDirName,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          null,
+          2,
+        ),
+      );
+    }
+  }
+  if (createdInteractiveDir) {
+    try {
+      await callTool(manager, store, "shell", {
+        profile,
+        command: `rm -rf -- ${interactiveDirName}`,
+        cwd: ".",
+        timeoutMs: 10000,
+      });
+    } catch (error) {
+      console.error(
+        JSON.stringify(
+          {
+            cleanupWarning: true,
+            fileName: interactiveDirName,
             error: error instanceof Error ? error.message : String(error),
           },
           null,

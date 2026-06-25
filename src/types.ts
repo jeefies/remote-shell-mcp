@@ -10,6 +10,8 @@ export interface RemoteProfileConfig {
   passphrase?: string;
   agent?: string;
   agentForward: boolean;
+  shell: string;
+  initCommand?: string;
   defaultRoot: string;
   roots: string[];
   defaultTimeoutMs: number;
@@ -77,10 +79,12 @@ export interface CompactText {
 
 export type ShellOutputMode = "json" | "terminal" | "compact";
 export type ShellToolResult = ShellResult | CompactShellResult | string;
+export type SessionMode = "context" | "interactive";
 
 export interface SessionInfo {
   id: string;
   profile: string;
+  mode: SessionMode;
   cwd: string;
   env: Record<string, string>;
   createdAt: string;
@@ -176,7 +180,7 @@ export interface RemoteClient {
   writeFile(path: string, content: string, expectedHash?: string): Promise<WriteFileResult>;
   editFile(path: string, oldText: string, newText: string, expectedHash?: string): Promise<EditFileResult>;
   applyPatch(patch: string, expectedHashes?: Record<string, string>): Promise<ApplyPatchResult>;
-  createSession(args?: { cwd?: string; env?: Record<string, string> }): SessionInfo;
+  createSession(args?: { cwd?: string; env?: Record<string, string>; mode?: SessionMode }): Promise<SessionInfo>;
   getSession(id: string): SessionInfo;
   setSessionCwd(id: string, cwd: string): SessionInfo;
   closeSession(id: string): { closed: string };

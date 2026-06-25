@@ -41,7 +41,7 @@ Responsibilities:
 - Cache one remote client per profile.
 - Own lifecycle cleanup.
 
-Within one MCP server process, this means SSH connections are reused per profile. Individual shell commands run as new exec channels over the existing SSH connection.
+Within one MCP server process, this means SSH connections are reused per profile. One-shot shell commands run as new exec channels over the existing SSH connection. Interactive sessions keep one remote shell channel alive and serialize commands through it.
 
 ### Remote Client Interface
 
@@ -121,15 +121,15 @@ Sets an existing profile as the default profile.
 
 ### `workspace_info`
 
-Returns selected profile metadata, configured roots, limits, common remote command availability, command paths, versions, shell, system, and a preferred Python command.
+Returns selected profile metadata, configured roots, limits, common remote command availability, command paths, versions, detected shell, configured shell, system, and a preferred Python command.
 
 ### `session_create`
 
-Creates a lightweight session context that stores cwd and env.
+Creates a session. `mode: "context"` stores cwd and env only. `mode: "interactive"` opens one persistent remote shell process for the session.
 
 ### `session_info`
 
-Returns a session's cwd, env, timestamps, and last exit code.
+Returns a session's mode, cwd, env, timestamps, and last exit code.
 
 ### `session_set_cwd`
 
@@ -137,7 +137,7 @@ Updates a session cwd after validating it stays inside allowed roots.
 
 ### `session_close`
 
-Removes a session context.
+Removes a session context and closes its interactive shell channel when present.
 
 ### `list_dir`
 
@@ -191,13 +191,16 @@ Runs remote `rg` under the selected root and returns parsed match objects.
 
 ### `shell`
 
-Runs a remote command through `sh -lc` with:
+Runs a remote command through the configured profile shell with:
 
 - cwd restricted to allowed roots
 - optional session cwd/env
+- optional profile `initCommand`
 - timeout
 - stdout/stderr byte limits
 - structured exit code and signal fields
+
+When called with an interactive `sessionId`, `shell` reuses that session's shell process so state from previous commands can persist.
 
 Output modes:
 
@@ -242,7 +245,7 @@ Add a session manager:
 - `shell_write`
 - `shell_stop`
 
-This should be separate from MVP `shell`, which stays request/response oriented.
+Interactive sessions cover request/response shell state reuse. Streaming process control is still a separate future surface.
 
 ### Approval Policy
 

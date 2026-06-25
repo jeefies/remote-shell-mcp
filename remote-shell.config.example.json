@@ -9,6 +9,8 @@
       "tryDefaultPrivateKeys": false,
       "agent": "pageant",
       "agentForward": false,
+      "shell": "bash",
+      "initCommand": "source ~/.bashrc",
       "defaultRoot": "/home/deploy/project",
       "roots": ["/home/deploy/project"],
       "defaultTimeoutMs": 30000,

@@ -71,6 +71,7 @@ try {
   const sessionText = sessionCreate.content.find((item) => item.type === "text")?.text ?? "";
   const session = JSON.parse(sessionText);
   assert.equal(session.cwd, "/root/remote-shell-mcp-test");
+  assert.equal(session.mode, "context");
 
   const sessionInfo = await client.callTool({
     name: "session_info",

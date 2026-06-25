@@ -40,6 +40,8 @@ try {
   const initial = await callTool(manager, store, "profile_list", {});
   assert.equal(initial.defaultProfile, "base");
   assert.equal(initial.profiles.length, 1);
+  assert.equal(initial.profiles[0].shell, "sh");
+  assert.equal(initial.profiles[0].hasInitCommand, false);
 
   const created = await callTool(manager, store, "profile_create", {
     name: "second",
@@ -70,10 +72,14 @@ try {
     name: "second",
     patch: {
       port: 2222,
+      shell: "bash",
+      initCommand: "source ~/.bashrc",
       defaultTimeoutMs: 12000,
     },
   });
   assert.equal(updated.port, 2222);
+  assert.equal(updated.shell, "bash");
+  assert.equal(updated.hasInitCommand, true);
   assert.equal(updated.defaultTimeoutMs, 12000);
 
   await assertToolError("ERR_PROFILE_NOT_FOUND", () =>

@@ -16,6 +16,8 @@ export const profileSchema = z.object({
   passphrase: z.string().optional(),
   agent: z.string().optional(),
   agentForward: z.boolean().default(false),
+  shell: z.string().min(1).default("sh"),
+  initCommand: z.string().min(1).optional(),
   defaultRoot: z.string().min(1),
   roots: z.array(z.string().min(1)).min(1),
   defaultTimeoutMs: z.number().int().positive().default(30_000),
@@ -53,6 +55,8 @@ export interface PublicProfile {
   };
   defaultRoot: string;
   roots: string[];
+  shell: string;
+  hasInitCommand: boolean;
   defaultTimeoutMs: number;
   maxOutputBytes: number;
   maxReadBytes: number;
@@ -331,6 +335,8 @@ function toPublicProfile(profile: RemoteProfileConfig): PublicProfile {
     },
     defaultRoot: profile.defaultRoot,
     roots: profile.roots,
+    shell: profile.shell,
+    hasInitCommand: Boolean(profile.initCommand),
     defaultTimeoutMs: profile.defaultTimeoutMs,
     maxOutputBytes: profile.maxOutputBytes,
     maxReadBytes: profile.maxReadBytes,
